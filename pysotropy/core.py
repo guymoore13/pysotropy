@@ -14,6 +14,9 @@ from fractions import Fraction
 import numpy as np
 from sarge import Command, Capture
 
+from pymatgen.io.cif import CifFile, CifWriter
+from pymatgen.symmetry.maggroups import MagneticSpaceGroup
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -623,6 +626,129 @@ def getPossibleOPs_for_basis(parent, subgroup, basis, origin, coupled_order=2):
                                                                                  this_basis):
             compatible_ops.append(op)
     return compatible_ops
+
+
+class FindsymSession:
+    """
+    """
+    def __init__(self, structure):
+        """
+        Args:
+        """
+
+        self.input_structure = structure.copy()
+
+        iso_location = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'iso/')
+
+        self.input_filename_cif = os.path.join(iso_location, 'findsym_input.mcif')
+        self.output_filename_cif = os.path.join(iso_location, 'findsym.cif')
+        # self.input_filename_findsym = os.path.join(iso_location, 'findsym_in.in')
+        self.input_filename_findsym = 'findsym_in.in'
+        self.write_cif_input()
+
+        # write initial input from mcif file
+        findsym_command = 'findsym_cifinput ' + self.input_filename_cif
+
+        logger.debug("""starting isotropy session in {}
+                        using isotropy in: {}""".format(
+                            os.getcwd(), iso_location))
+        self.findsym_cifinput_process = Command(os.path.join(iso_location, findsym_command),
+                                       stdout=Capture(buffer_size=1),
+                                       env={"ISODATA": iso_location})
+        try:
+            self.findsym_cifinput_process.run(input=PIPE, async_=False)
+        except FileNotFoundError:
+            raise Exception("Couldn't find Isotropy (findsym) for Linux, see installation instructions")
+
+        with open(self.input_filename_findsym, "w") as io_file:
+
+            # move past initial output
+            keep_reading = True
+            while keep_reading:
+                # this_line = self.iso_process.stdout.readline().decode()
+                this_line = self.findsym_cifinput_process.stdout.readline().decode()
+                if this_line: # don't log until isotropy responds
+                    logger.debug("isotropy: {}".format(this_line))
+                    io_file.write(this_line)
+                else:
+                    keep_reading = False
+
+        # run findsym
+        findsym_command = 'findsym ' + self.input_filename_findsym
+
+        self.findsym_process = Command(os.path.join(iso_location, findsym_command),
+                                       stdout=Capture(buffer_size=1),
+                                       env={"ISODATA": iso_location})
+        try:
+            self.findsym_process.run(input=PIPE, async_=False)
+        except FileNotFoundError:
+            raise Exception("Couldn't find Isotropy (findsym) for Linux, see installation instructions")
+
+        # # move past initial output
+        # keep_reading = True
+        # while keep_reading:
+        #     this_line = self.findsym_process.stdout.readline().decode()
+        #     # this_line = self.read_iso_line()
+        #     if this_line: # don't log until isotropy responds
+        #         logger.debug("isotropy: {}".format(this_line))
+        #     else:
+        #         keep_reading = False
+
+        self.output_cif_file = CifFile.from_file(self.output_filename_cif)
+
+        msg_int_symbol = int(self.output_cif_file.data['findsym-output'].data[
+            '_symmetry_Int_Tables_number'])
+
+        self.magnetic_space_group = MagneticSpaceGroup(msg_int_symbol)
+
+    def get_msg(self):
+        return self.magnetic_space_group
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exec_type, exc_value, exc_traceback):
+        self.sendCommand("QUIT")
+
+    def sendCommand(self, command):
+        # read the '*' that indicates the prompt so they don't build up
+        this_line = self.read_iso_line()
+        # logger.debug("reading *: {}".format(this_line))
+        logger.debug(f'python: {command}')
+        # self.findsym_process.stdin.write(bytes(command + "\n", "ascii"))
+        # self.findsym_process.stdin.flush()
+
+    def write_cif_input(self):
+
+        cif_writer = CifWriter(struct=self.input_structure,
+                               symprec=None, write_magmoms=True,
+                               significant_figures=8, angle_tolerance=5.0,
+                               refine_struct=True)
+
+        cif_writer.write_file(self.input_filename_cif)
+
+    # def write_input(self):
+
+    #     inputfile_string = """ \
+    #     !useKeyWords
+    #     !title 
+    #     Structure input file
+    #     !latticeParameters
+    #     %s
+    #     !unitCellCentering
+    #     %s
+    #     !atomCount
+    #     %s
+    #     !atomPosition
+    #     %s
+    #     """ % (lat_param_s, unit_cell_centering_s,
+    #            atom_count_s, atom_pos_s)
+
+    def read_iso_line(self):
+        raw = self.findsym_process.stdout.readline().decode()
+        this_line = raw.rstrip('\n')
+        logger.debug("isotropy: {}".format(this_line))
+        return this_line
 
 
 if __name__ == '__main__':
